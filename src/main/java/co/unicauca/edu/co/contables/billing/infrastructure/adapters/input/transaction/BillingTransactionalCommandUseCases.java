@@ -8,6 +8,7 @@ import co.unicauca.edu.co.contables.billing.application.ports.input.SaveInvoiceD
 import co.unicauca.edu.co.contables.billing.application.ports.input.SaveReturnDraftUseCase;
 import co.unicauca.edu.co.contables.billing.application.ports.input.command.InvoiceDraftCommand;
 import co.unicauca.edu.co.contables.billing.application.ports.input.command.ReturnDraftCommand;
+import co.unicauca.edu.co.contables.billing.application.ports.output.AccountingEntryPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.BillingClockPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.BillingDocumentRepositoryPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.BillingExecutionContextPort;
@@ -16,6 +17,7 @@ import co.unicauca.edu.co.contables.billing.application.ports.output.BillingOutb
 import co.unicauca.edu.co.contables.billing.application.ports.output.DocumentNumberSequencePort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.EnterprisePort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.ProductPort;
+import co.unicauca.edu.co.contables.billing.application.ports.output.StockMovementPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.ThirdPartyPort;
 import co.unicauca.edu.co.contables.billing.application.service.BillingAnnulmentService;
 import co.unicauca.edu.co.contables.billing.application.service.BillingDocumentLoader;
@@ -49,15 +51,17 @@ public class BillingTransactionalCommandUseCases
     public BillingTransactionalCommandUseCases(BillingDocumentRepositoryPort repository,
             ThirdPartyPort thirdParties, ProductPort products, EnterprisePort enterprises,
             DocumentNumberSequencePort sequence, BillingOutboxPort outbox,
-            BillingExecutionContextPort context, BillingClockPort clock, BillingIdGeneratorPort ids) {
+            BillingExecutionContextPort context, BillingClockPort clock, BillingIdGeneratorPort ids,
+            StockMovementPort stock, AccountingEntryPort accounting) {
         BillingDocumentLoader loader = new BillingDocumentLoader(repository);
         BillingReferenceResolver resolver = new BillingReferenceResolver(thirdParties, products, enterprises);
         this.draftService = new BillingInvoiceDraftService(repository, loader, resolver, context, clock, ids);
         this.returnDraftService = new BillingReturnDraftService(repository, loader, context, clock, ids);
         this.deletionService = new BillingDraftDeletionService(repository, loader);
         this.emissionService = new BillingEmissionService(repository, loader, resolver, sequence, outbox, context,
-                clock, ids);
-        this.annulmentService = new BillingAnnulmentService(repository, loader, outbox, context, clock, ids);
+                clock, ids, stock, accounting);
+        this.annulmentService = new BillingAnnulmentService(repository, loader, outbox, context, clock, ids, stock,
+                accounting);
     }
 
     @Override
@@ -97,8 +101,10 @@ public class BillingTransactionalCommandUseCases
     }
 
     /**
-     * Documento, secuencia y outbox comparten esta unica transaccion (EMT-3, EVT-1). El bloqueo de
-     * la secuencia se toma tarde (despues de validar) y se libera con el commit o rollback.
+     * Documento, secuencia, integraciones (stock, asientos) y outbox comparten esta unica transaccion
+     * (EMT-3, EVT-1): si cualquiera falla se revierte todo. El bloqueo de la secuencia se toma tarde
+     * (despues de validar) y se libera con el commit o rollback. Repetir la emision de un documento
+     * ya EMITIDA devuelve el mismo documento sin tocar nada.
      */
     @Override
     @Transactional
@@ -107,8 +113,10 @@ public class BillingTransactionalCommandUseCases
     }
 
     /**
-     * La fila del documento se bloquea al cargarlo y el cambio de estado, el evento del outbox y la
-     * liberacion del bloqueo comparten esta unica transaccion (ANL-1, EVT-1, D12).
+     * La fila del documento se bloquea al cargarlo y el cambio de estado, las integraciones (stock,
+     * asientos), el evento del outbox y la liberacion del bloqueo comparten esta unica transaccion
+     * (ANL-1, EVT-1, D12). Repetir la anulacion de un documento ya ANULADA devuelve el mismo
+     * documento sin tocar nada.
      */
     @Override
     @Transactional

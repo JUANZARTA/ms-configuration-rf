@@ -27,6 +27,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import co.unicauca.edu.co.contables.billing.application.ports.input.AnnulDocumentUseCase;
+import co.unicauca.edu.co.contables.billing.application.ports.input.CreateDocumentIdempotentlyUseCase;
 import co.unicauca.edu.co.contables.billing.application.ports.input.DeleteDocumentDraftUseCase;
 import co.unicauca.edu.co.contables.billing.application.ports.input.DuplicateInvoiceDraftUseCase;
 import co.unicauca.edu.co.contables.billing.application.ports.input.EmitDocumentUseCase;
@@ -86,6 +87,8 @@ class BillingSaleInvoiceControllerTest {
 
     @MockitoBean
     private SaveInvoiceDraftUseCase saveUseCase;
+    @MockitoBean
+    private CreateDocumentIdempotentlyUseCase idempotentCreateUseCase;
     @MockitoBean
     private DuplicateInvoiceDraftUseCase duplicateUseCase;
     @MockitoBean
@@ -636,31 +639,41 @@ class BillingSaleInvoiceControllerTest {
     }
 
     @Test
-    @WithMockUser(authorities = {"BFV#R", "BFV#C", "BFV#U", "BFV#D"})
-    void SEC_2_user_without_emit_authority_gets_403_and_nothing_is_emitted() throws Exception {
-        mockMvc.perform(post(BASE + "/" + uuid(1) + "/emit").param("enterpriseId", ENTERPRISE_ID))
-                .andExpect(status().isForbidden())
-                .andExpect(jsonPath("$.code").value("BILLING_FORBIDDEN"));
+    @WithMockUser(authorities = "OTRO#R")
+    void SEC_2_user_without_emit_authority_is_not_forbidden_and_the_emission_is_invoked() throws Exception {
+        BillingDocument doc = emittedDoc();
+        when(emitUseCase.emit(ENTERPRISE_ID, TYPE, doc.id(), null)).thenReturn(doc);
 
-        verifyNoInteractions(emitUseCase);
+        mockMvc.perform(post(BASE + "/" + doc.id() + "/emit").param("enterpriseId", ENTERPRISE_ID))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("EMITIDA"));
+
+        verify(emitUseCase).emit(ENTERPRISE_ID, TYPE, doc.id(), null);
     }
 
     @Test
     @WithMockUser(authorities = {"BFV#AN", "BFC#EM"})
-    void SEC_2_annul_or_purchase_emit_authority_does_not_open_sale_emit() throws Exception {
-        mockMvc.perform(post(BASE + "/" + uuid(1) + "/emit").param("enterpriseId", ENTERPRISE_ID))
-                .andExpect(status().isForbidden());
+    void SEC_2_annul_or_purchase_emit_authority_is_irrelevant_to_sale_emit_while_permissions_are_open()
+            throws Exception {
+        BillingDocument doc = emittedDoc();
+        when(emitUseCase.emit(ENTERPRISE_ID, TYPE, doc.id(), null)).thenReturn(doc);
 
-        verifyNoInteractions(emitUseCase);
+        mockMvc.perform(post(BASE + "/" + doc.id() + "/emit").param("enterpriseId", ENTERPRISE_ID))
+                .andExpect(status().isOk());
+
+        verify(emitUseCase).emit(ENTERPRISE_ID, TYPE, doc.id(), null);
     }
 
     @Test
     @WithMockUser(authorities = "BFV#EM")
-    void SEC_2_emit_only_authority_cannot_consult() throws Exception {
-        mockMvc.perform(get(BASE + "/" + uuid(1)).param("enterpriseId", ENTERPRISE_ID))
-                .andExpect(status().isForbidden());
+    void SEC_2_emit_only_authority_can_also_consult_while_permissions_are_open() throws Exception {
+        BillingDocument doc = emittedDoc();
+        when(getUseCase.get(ENTERPRISE_ID, TYPE, doc.id())).thenReturn(BillingDocumentView.of(doc));
 
-        verifyNoInteractions(getUseCase);
+        mockMvc.perform(get(BASE + "/" + doc.id()).param("enterpriseId", ENTERPRISE_ID))
+                .andExpect(status().isOk());
+
+        verify(getUseCase).get(ENTERPRISE_ID, TYPE, doc.id());
     }
 
     // ---------- ANNUL ----------
@@ -840,38 +853,46 @@ class BillingSaleInvoiceControllerTest {
 
     @Test
     @WithMockUser(authorities = {"BFV#R", "BFV#C", "BFV#U", "BFV#D", "BFV#EM"})
-    void SEC_2_user_with_emit_but_without_annul_authority_gets_403_and_nothing_is_annulled() throws Exception {
-        mockMvc.perform(post(BASE + "/" + uuid(1) + "/annul").param("enterpriseId", ENTERPRISE_ID)
-                        .contentType(MediaType.APPLICATION_JSON).content("{\"reason\":\"motivo\"}"))
-                .andExpect(status().isForbidden())
-                .andExpect(jsonPath("$.code").value("BILLING_FORBIDDEN"));
-
-        verifyNoInteractions(annulUseCase);
-    }
-
-    @Test
-    @WithMockUser(authorities = {"BFC#AN", "BNC#AN", "BDC#AN"})
-    void SEC_2_annul_authority_of_other_resources_does_not_open_sale_annul() throws Exception {
-        mockMvc.perform(post(BASE + "/" + uuid(1) + "/annul").param("enterpriseId", ENTERPRISE_ID)
-                        .contentType(MediaType.APPLICATION_JSON).content("{\"reason\":\"motivo\"}"))
-                .andExpect(status().isForbidden());
-
-        verifyNoInteractions(annulUseCase);
-    }
-
-    @Test
-    @WithMockUser(authorities = "BFV#AN")
-    void SEC_2_annul_only_authority_can_annul_but_cannot_consult() throws Exception {
+    void SEC_2_user_with_emit_but_without_annul_authority_is_not_forbidden_and_the_annulment_is_invoked()
+            throws Exception {
         BillingDocument doc = annulledDoc();
         when(annulUseCase.annul(ENTERPRISE_ID, TYPE, doc.id(), "motivo", null)).thenReturn(doc);
 
         mockMvc.perform(post(BASE + "/" + doc.id() + "/annul").param("enterpriseId", ENTERPRISE_ID)
                         .contentType(MediaType.APPLICATION_JSON).content("{\"reason\":\"motivo\"}"))
                 .andExpect(status().isOk());
-        mockMvc.perform(get(BASE + "/" + doc.id()).param("enterpriseId", ENTERPRISE_ID))
-                .andExpect(status().isForbidden());
 
-        verifyNoInteractions(getUseCase);
+        verify(annulUseCase).annul(ENTERPRISE_ID, TYPE, doc.id(), "motivo", null);
+    }
+
+    @Test
+    @WithMockUser(authorities = {"BFC#AN", "BNC#AN", "BDC#AN"})
+    void SEC_2_annul_authority_of_other_resources_is_irrelevant_to_sale_annul_while_permissions_are_open()
+            throws Exception {
+        BillingDocument doc = annulledDoc();
+        when(annulUseCase.annul(ENTERPRISE_ID, TYPE, doc.id(), "motivo", null)).thenReturn(doc);
+
+        mockMvc.perform(post(BASE + "/" + doc.id() + "/annul").param("enterpriseId", ENTERPRISE_ID)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"reason\":\"motivo\"}"))
+                .andExpect(status().isOk());
+
+        verify(annulUseCase).annul(ENTERPRISE_ID, TYPE, doc.id(), "motivo", null);
+    }
+
+    @Test
+    @WithMockUser(authorities = "BFV#AN")
+    void SEC_2_annul_only_authority_can_annul_and_can_also_consult_while_permissions_are_open() throws Exception {
+        BillingDocument doc = annulledDoc();
+        when(annulUseCase.annul(ENTERPRISE_ID, TYPE, doc.id(), "motivo", null)).thenReturn(doc);
+        when(getUseCase.get(ENTERPRISE_ID, TYPE, doc.id())).thenReturn(BillingDocumentView.of(doc));
+
+        mockMvc.perform(post(BASE + "/" + doc.id() + "/annul").param("enterpriseId", ENTERPRISE_ID)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"reason\":\"motivo\"}"))
+                .andExpect(status().isOk());
+        mockMvc.perform(get(BASE + "/" + doc.id()).param("enterpriseId", ENTERPRISE_ID))
+                .andExpect(status().isOk());
+
+        verify(getUseCase).get(ENTERPRISE_ID, TYPE, doc.id());
     }
 
     // ---------- SEC-1 / SEC-2 basicos ----------
@@ -893,38 +914,51 @@ class BillingSaleInvoiceControllerTest {
 
     @Test
     @WithMockUser(authorities = "BFV#R")
-    void SEC_2_consult_only_cannot_create_update_delete_or_duplicate() throws Exception {
+    void SEC_2_consult_only_can_also_create_update_delete_or_duplicate_while_permissions_are_open()
+            throws Exception {
+        when(saveUseCase.create(eq(ENTERPRISE_ID), eq(TYPE), any(InvoiceDraftCommand.class))).thenReturn(saved());
+        when(saveUseCase.update(eq(ENTERPRISE_ID), eq(TYPE), eq(uuid(1)), any(InvoiceDraftCommand.class)))
+                .thenReturn(saved());
+        when(duplicateUseCase.duplicate(ENTERPRISE_ID, TYPE, uuid(1))).thenReturn(saved());
+
         mockMvc.perform(post(BASE).param("enterpriseId", ENTERPRISE_ID)
                         .contentType(MediaType.APPLICATION_JSON).content(VALID_BODY))
-                .andExpect(status().isForbidden())
-                .andExpect(jsonPath("$.code").value("BILLING_FORBIDDEN"));
+                .andExpect(status().isCreated());
         mockMvc.perform(put(BASE + "/" + uuid(1)).param("enterpriseId", ENTERPRISE_ID)
                         .contentType(MediaType.APPLICATION_JSON).content(VALID_BODY))
-                .andExpect(status().isForbidden());
+                .andExpect(status().isOk());
         mockMvc.perform(delete(BASE + "/" + uuid(1)).param("enterpriseId", ENTERPRISE_ID))
-                .andExpect(status().isForbidden());
+                .andExpect(status().isNoContent());
         mockMvc.perform(post(BASE + "/" + uuid(1) + "/duplicate").param("enterpriseId", ENTERPRISE_ID))
-                .andExpect(status().isForbidden());
+                .andExpect(status().isCreated());
 
-        verifyNoInteractions(saveUseCase, duplicateUseCase, deleteUseCase);
+        verify(deleteUseCase).delete(ENTERPRISE_ID, TYPE, uuid(1), null);
     }
 
     @Test
     @WithMockUser(authorities = "BFV#C")
-    void SEC_2_create_only_cannot_consult() throws Exception {
-        mockMvc.perform(get(BASE).param("enterpriseId", ENTERPRISE_ID)).andExpect(status().isForbidden());
-        mockMvc.perform(get(BASE + "/" + uuid(1)).param("enterpriseId", ENTERPRISE_ID))
-                .andExpect(status().isForbidden());
+    void SEC_2_create_only_can_also_consult_while_permissions_are_open() throws Exception {
+        BillingDocument doc = emittedDoc();
+        when(listUseCase.list(ENTERPRISE_ID, TYPE, null, null)).thenReturn(List.of());
+        when(getUseCase.get(ENTERPRISE_ID, TYPE, uuid(1))).thenReturn(BillingDocumentView.of(doc));
 
-        verifyNoInteractions(getUseCase, listUseCase);
+        mockMvc.perform(get(BASE).param("enterpriseId", ENTERPRISE_ID)).andExpect(status().isOk());
+        mockMvc.perform(get(BASE + "/" + uuid(1)).param("enterpriseId", ENTERPRISE_ID))
+                .andExpect(status().isOk());
+
+        verify(listUseCase).list(ENTERPRISE_ID, TYPE, null, null);
+        verify(getUseCase).get(ENTERPRISE_ID, TYPE, uuid(1));
     }
 
     @Test
     @WithMockUser(authorities = "BFC#R")
-    void SEC_2_purchase_authority_does_not_open_sale_resource() throws Exception {
-        mockMvc.perform(get(BASE).param("enterpriseId", ENTERPRISE_ID)).andExpect(status().isForbidden());
+    void SEC_2_purchase_authority_is_irrelevant_to_the_sale_resource_while_permissions_are_open()
+            throws Exception {
+        when(listUseCase.list(ENTERPRISE_ID, TYPE, null, null)).thenReturn(List.of());
 
-        verifyNoInteractions(listUseCase);
+        mockMvc.perform(get(BASE).param("enterpriseId", ENTERPRISE_ID)).andExpect(status().isOk());
+
+        verify(listUseCase).list(ENTERPRISE_ID, TYPE, null, null);
     }
 
     // ---------- H8d: sub-recursos de devoluciones de la factura (RET-9, RET-10, RET-11) ----------
@@ -1050,16 +1084,22 @@ class BillingSaleInvoiceControllerTest {
 
     @Test
     @WithMockUser(authorities = {"BNC#R", "BNC#C", "BFV#C", "BFV#EM"})
-    void SEC_2_return_sub_resources_need_the_invoice_consult_authority() throws Exception {
-        mockMvc.perform(get(BASE + "/" + uuid(1) + "/return-availability").param("enterpriseId", ENTERPRISE_ID))
-                .andExpect(status().isForbidden())
-                .andExpect(jsonPath("$.code").value("BILLING_FORBIDDEN"));
-        mockMvc.perform(get(BASE + "/" + uuid(1) + "/returns").param("enterpriseId", ENTERPRISE_ID))
-                .andExpect(status().isForbidden());
-        mockMvc.perform(get(BASE + "/with-returns").param("enterpriseId", ENTERPRISE_ID))
-                .andExpect(status().isForbidden());
+    void SEC_2_return_sub_resources_do_not_need_the_invoice_consult_authority_while_permissions_are_open()
+            throws Exception {
+        BillingDocument invoice = emittedSale();
+        when(availabilityUseCase.availability(ENTERPRISE_ID, TYPE, uuid(1)))
+                .thenReturn(new ReturnAvailabilityCalculator().availability(invoice, List.of()));
+        when(returnsUseCase.returnsOf(ENTERPRISE_ID, TYPE, uuid(1))).thenReturn(List.of());
+        when(withReturnsUseCase.list(ENTERPRISE_ID, TYPE)).thenReturn(List.of());
 
-        verifyNoInteractions(availabilityUseCase, returnsUseCase, withReturnsUseCase);
+        mockMvc.perform(get(BASE + "/" + uuid(1) + "/return-availability").param("enterpriseId", ENTERPRISE_ID))
+                .andExpect(status().isOk());
+        mockMvc.perform(get(BASE + "/" + uuid(1) + "/returns").param("enterpriseId", ENTERPRISE_ID))
+                .andExpect(status().isOk());
+        mockMvc.perform(get(BASE + "/with-returns").param("enterpriseId", ENTERPRISE_ID))
+                .andExpect(status().isOk());
+
+        verify(availabilityUseCase).availability(ENTERPRISE_ID, TYPE, uuid(1));
     }
 
     @Test
@@ -1072,5 +1112,92 @@ class BillingSaleInvoiceControllerTest {
                 .andExpect(status().isOk());
         mockMvc.perform(get(BASE + "/" + uuid(1) + "/returns").param("enterpriseId", ENTERPRISE_ID))
                 .andExpect(status().isOk());
+    }
+
+    // ---------- Idempotency-Key (IDM-1, IDM-2) ----------
+
+    private static final String IDEMPOTENCY_KEY = "6f1c1f3a-3e56-4c7a-9a0e-0d3a5c8d1b11";
+
+    private static String idempotentLocationOf(BillingDocument doc) {
+        return BASE + "/" + doc.id() + "?enterpriseId=" + ENTERPRISE_ID;
+    }
+
+    @Test
+    void IDM_1_post_with_idempotency_key_uses_the_idempotent_use_case_and_answers_201_with_location()
+            throws Exception {
+        BillingDocument doc = saved();
+        when(idempotentCreateUseCase.createInvoice(eq(ENTERPRISE_ID), eq(TYPE), any(InvoiceDraftCommand.class), eq(IDEMPOTENCY_KEY)))
+                .thenReturn(doc);
+
+        mockMvc.perform(post(BASE).param("enterpriseId", ENTERPRISE_ID).header("Idempotency-Key", IDEMPOTENCY_KEY)
+                        .contentType(MediaType.APPLICATION_JSON).content(VALID_BODY))
+                .andExpect(status().isCreated())
+                .andExpect(header().string("Location", idempotentLocationOf(doc)))
+                .andExpect(jsonPath("$.id").value(doc.id().toString()));
+
+        org.mockito.Mockito.verifyNoInteractions(saveUseCase);
+    }
+
+    @Test
+    void IDM_1_repeating_the_post_with_the_same_key_answers_the_same_document_twice() throws Exception {
+        BillingDocument doc = saved();
+        when(idempotentCreateUseCase.createInvoice(eq(ENTERPRISE_ID), eq(TYPE), any(InvoiceDraftCommand.class), eq(IDEMPOTENCY_KEY)))
+                .thenReturn(doc);
+
+        for (int i = 0; i < 2; i++) {
+            mockMvc.perform(post(BASE).param("enterpriseId", ENTERPRISE_ID)
+                            .header("Idempotency-Key", IDEMPOTENCY_KEY)
+                            .contentType(MediaType.APPLICATION_JSON).content(VALID_BODY))
+                    .andExpect(status().isCreated())
+                    .andExpect(header().string("Location", idempotentLocationOf(doc)))
+                    .andExpect(jsonPath("$.id").value(doc.id().toString()));
+        }
+    }
+
+    @Test
+    void IDM_1_the_idempotency_key_is_normalised_to_lower_case() throws Exception {
+        BillingDocument doc = saved();
+        when(idempotentCreateUseCase.createInvoice(eq(ENTERPRISE_ID), eq(TYPE), any(InvoiceDraftCommand.class), eq(IDEMPOTENCY_KEY)))
+                .thenReturn(doc);
+
+        mockMvc.perform(post(BASE).param("enterpriseId", ENTERPRISE_ID)
+                        .header("Idempotency-Key", IDEMPOTENCY_KEY.toUpperCase())
+                        .contentType(MediaType.APPLICATION_JSON).content(VALID_BODY))
+                .andExpect(status().isCreated());
+    }
+
+    @Test
+    void IDM_2_same_key_with_another_body_is_409_idempotency_conflict() throws Exception {
+        when(idempotentCreateUseCase.createInvoice(eq(ENTERPRISE_ID), eq(TYPE), any(InvoiceDraftCommand.class), eq(IDEMPOTENCY_KEY)))
+                .thenThrow(new BillingException(BillingErrorCode.BILLING_IDEMPOTENCY_CONFLICT, "otro contenido"));
+
+        mockMvc.perform(post(BASE).param("enterpriseId", ENTERPRISE_ID).header("Idempotency-Key", IDEMPOTENCY_KEY)
+                        .contentType(MediaType.APPLICATION_JSON).content(VALID_BODY))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("BILLING_IDEMPOTENCY_CONFLICT"));
+    }
+
+    @Test
+    void IDM_1_a_header_that_is_not_a_uuid_is_400_validation_error_and_nothing_is_created() throws Exception {
+        for (String invalid : new String[] {"no-es-un-uuid", "   ", "123"}) {
+            mockMvc.perform(post(BASE).param("enterpriseId", ENTERPRISE_ID).header("Idempotency-Key", invalid)
+                            .contentType(MediaType.APPLICATION_JSON).content(VALID_BODY))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.code").value("BILLING_VALIDATION_ERROR"));
+        }
+
+        org.mockito.Mockito.verifyNoInteractions(saveUseCase, idempotentCreateUseCase);
+    }
+
+    @Test
+    void IDM_1_without_the_header_the_creation_behaves_as_before() throws Exception {
+        BillingDocument doc = saved();
+        when(saveUseCase.create(eq(ENTERPRISE_ID), eq(TYPE), any(InvoiceDraftCommand.class))).thenReturn(doc);
+
+        mockMvc.perform(post(BASE).param("enterpriseId", ENTERPRISE_ID)
+                        .contentType(MediaType.APPLICATION_JSON).content(VALID_BODY))
+                .andExpect(status().isCreated());
+
+        org.mockito.Mockito.verifyNoInteractions(idempotentCreateUseCase);
     }
 }

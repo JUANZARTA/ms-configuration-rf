@@ -11,6 +11,7 @@ import co.unicauca.edu.co.contables.billing.infrastructure.adapters.input.rest.d
 import co.unicauca.edu.co.contables.billing.infrastructure.adapters.input.rest.dto.ReturnAvailabilityResponse;
 import co.unicauca.edu.co.contables.billing.infrastructure.adapters.input.rest.dto.ReturnSummaryResponse;
 import co.unicauca.edu.co.contables.billing.infrastructure.adapters.input.rest.support.BillingInvoiceEndpointSupport;
+import co.unicauca.edu.co.contables.billing.infrastructure.adapters.input.rest.support.BillingIdempotencyHeader;
 import co.unicauca.edu.co.contables.billing.infrastructure.adapters.input.rest.support.BillingPermissions;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
@@ -25,6 +26,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -53,8 +55,9 @@ public class BillingPurchaseInvoiceController {
     @PreAuthorize(BillingPermissions.PURCHASE_INVOICE_CREATE)
     public ResponseEntity<BillingInvoiceResponse> create(
             @RequestParam("enterpriseId") @NotBlank @Size(max = 50) String enterpriseId,
-            @Valid @RequestBody InvoiceDraftRequest request) {
-        return support.create(TYPE, BASE_PATH, enterpriseId, request);
+            @Valid @RequestBody InvoiceDraftRequest request,
+            @RequestHeader(name = BillingIdempotencyHeader.NAME, required = false) String idempotencyKey) {
+        return support.create(TYPE, BASE_PATH, enterpriseId, request, idempotencyKey);
     }
 
     @PutMapping("/{id}")

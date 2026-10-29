@@ -30,8 +30,8 @@ import org.springframework.util.ObjectUtils;
 @EntityScan(basePackageClasses = BillingDocumentEntity.class)
 @EnableJpaRepositories(basePackageClasses = BillingDocumentJpaRepository.class)
 @Import({BillingDocumentPersistenceAdapter.class, BillingDocumentPersistenceMapper.class,
-        BillingDocumentSequenceAdapter.class, BillingTransactionRunnerAdapter.class, BillingClockAdapter.class,
-        BillingExecutionContextAdapter.class, BillingEventSerializer.class, BillingOutboxAdapter.class})
+        BillingDocumentSequenceAdapter.class, BillingIdempotencyAdapter.class, BillingTransactionRunnerAdapter.class,
+        BillingClockAdapter.class, BillingExecutionContextAdapter.class, BillingEventSerializer.class, BillingOutboxAdapter.class})
 public class BillingJpaTestConfig {
 
     @Bean

@@ -111,6 +111,13 @@ class BillingOutboxRelayServiceTest {
                 active = false;
             }
         }
+
+        @Override
+        public <T> T callInNewTransaction(java.util.function.Supplier<T> action) {
+            java.util.concurrent.atomic.AtomicReference<T> result = new java.util.concurrent.atomic.AtomicReference<>();
+            inNewTransaction(() -> result.set(action.get()));
+            return result.get();
+        }
     }
 
     @BeforeEach

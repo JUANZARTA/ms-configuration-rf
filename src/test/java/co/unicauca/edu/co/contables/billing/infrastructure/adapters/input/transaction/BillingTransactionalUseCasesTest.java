@@ -5,6 +5,7 @@ import static co.unicauca.edu.co.contables.billing.support.BillingTestData.ENTER
 import static co.unicauca.edu.co.contables.billing.support.BillingTestData.NOW;
 import static co.unicauca.edu.co.contables.billing.support.BillingTestData.TODAY;
 import static co.unicauca.edu.co.contables.billing.support.BillingTestData.USER;
+import static co.unicauca.edu.co.contables.billing.support.BillingTestData.annulledSale;
 import static co.unicauca.edu.co.contables.billing.support.BillingTestData.customer;
 import static co.unicauca.edu.co.contables.billing.support.BillingTestData.emittedReturnOf;
 import static co.unicauca.edu.co.contables.billing.support.BillingTestData.emittedSale;
@@ -32,6 +33,7 @@ import co.unicauca.edu.co.contables.billing.application.ports.input.view.Billing
 import co.unicauca.edu.co.contables.billing.application.ports.input.view.BillingDocumentView;
 import co.unicauca.edu.co.contables.billing.application.ports.input.view.InvoiceWithReturnsSummary;
 import co.unicauca.edu.co.contables.billing.application.ports.input.view.ReturnSummary;
+import co.unicauca.edu.co.contables.billing.application.ports.output.AccountingEntryPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.BillingClockPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.BillingDocumentRepositoryPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.BillingExecutionContextPort;
@@ -40,6 +42,7 @@ import co.unicauca.edu.co.contables.billing.application.ports.output.BillingOutb
 import co.unicauca.edu.co.contables.billing.application.ports.output.DocumentNumberSequencePort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.EnterprisePort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.ProductPort;
+import co.unicauca.edu.co.contables.billing.application.ports.output.StockMovementPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.ThirdPartyPort;
 import co.unicauca.edu.co.contables.billing.domain.event.BillingDomainEvent;
 import co.unicauca.edu.co.contables.billing.domain.exception.BillingErrorCode;
@@ -89,6 +92,10 @@ class BillingTransactionalUseCasesTest {
     private DocumentNumberSequencePort sequence;
     @Mock
     private BillingOutboxPort outbox;
+    @Mock
+    private StockMovementPort stock;
+    @Mock
+    private AccountingEntryPort accounting;
 
     private BillingTransactionalCommandUseCases commands;
     private BillingTransactionalQueryUseCases queries;
@@ -96,7 +103,7 @@ class BillingTransactionalUseCasesTest {
     @BeforeEach
     void setUp() {
         commands = new BillingTransactionalCommandUseCases(repository, thirdParties, products, enterprises, sequence,
-                outbox, context, clock, ids);
+                outbox, context, clock, ids, stock, accounting);
         queries = new BillingTransactionalQueryUseCases(repository, thirdParties, products, enterprises);
     }
 
@@ -216,7 +223,7 @@ class BillingTransactionalUseCasesTest {
         when(context.username()).thenReturn(USER);
         when(clock.now()).thenReturn(NOW);
         when(ids.newId()).thenReturn(uuid(77));
-        when(repository.findById(ENTERPRISE_ID, uuid(1))).thenReturn(Optional.of(readySaleDraft()));
+        when(repository.findByIdForUpdate(ENTERPRISE_ID, uuid(1))).thenReturn(Optional.of(readySaleDraft()));
         when(thirdParties.findCounterparty(ENTERPRISE_ID, CUSTOMER_ID, CounterpartyRole.CUSTOMER))
                 .thenReturn(Optional.of(customer()));
         when(products.findProduct(ENTERPRISE_ID, 1L, DocumentKind.SALE)).thenReturn(Optional.of(product(1L)));
@@ -229,17 +236,30 @@ class BillingTransactionalUseCasesTest {
         assertThat(emitted.status()).isEqualTo(DocumentStatus.EMITIDA);
         assertThat(emitted.number().display()).isEqualTo("FV-000008");
         verify(outbox).append(any(BillingDomainEvent.class));
+        verify(stock).onEmitted(emitted);
+        verify(accounting).onEmitted(emitted);
     }
 
     @Test
-    void EMT_1_emit_of_an_emitted_document_is_rejected_without_consuming_a_number() {
-        when(repository.findById(ENTERPRISE_ID, uuid(1))).thenReturn(Optional.of(emittedSale()));
+    void IDM_1_emit_of_an_emitted_document_returns_it_without_consuming_a_number_or_publishing() {
+        BillingDocument emitted = emittedSale();
+        when(repository.findByIdForUpdate(ENTERPRISE_ID, uuid(1))).thenReturn(Optional.of(emitted));
+
+        BillingDocument result = commands.emit(ENTERPRISE_ID, DocumentType.SALE_INVOICE, uuid(1), null);
+
+        assertThat(result).isSameAs(emitted);
+        verifyNoInteractions(sequence, outbox, stock, accounting);
+    }
+
+    @Test
+    void EMT_4_emit_of_an_annulled_document_is_still_invalid_state() {
+        when(repository.findByIdForUpdate(ENTERPRISE_ID, uuid(1))).thenReturn(Optional.of(annulledSale()));
 
         assertThatThrownBy(() -> commands.emit(ENTERPRISE_ID, DocumentType.SALE_INVOICE, uuid(1), null))
                 .isInstanceOf(BillingException.class)
                 .satisfies(thrown -> assertThat(((BillingException) thrown).errorCode())
                         .isEqualTo(BillingErrorCode.BILLING_INVALID_STATE));
-        verifyNoInteractions(sequence, outbox);
+        verifyNoInteractions(sequence, outbox, stock, accounting);
     }
 
     @Test
@@ -370,7 +390,7 @@ class BillingTransactionalUseCasesTest {
         when(context.username()).thenReturn(USER);
         when(clock.now()).thenReturn(NOW);
         when(ids.newId()).thenReturn(uuid(77));
-        when(repository.findById(ENTERPRISE_ID, uuid(2))).thenReturn(Optional.of(draft));
+        when(repository.findByIdForUpdate(ENTERPRISE_ID, uuid(2))).thenReturn(Optional.of(draft));
         when(repository.findByIdForUpdate(ENTERPRISE_ID, uuid(10))).thenReturn(Optional.of(original));
         when(enterprises.findIssuer(ENTERPRISE_ID)).thenReturn(Optional.of(issuer()));
         when(sequence.nextValue(ENTERPRISE_ID, DocumentType.SALE_RETURN)).thenReturn(1L);

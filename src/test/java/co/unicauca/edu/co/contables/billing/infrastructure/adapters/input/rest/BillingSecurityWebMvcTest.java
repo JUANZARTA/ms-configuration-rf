@@ -18,9 +18,7 @@ import co.unicauca.edu.co.contables.billing.infrastructure.adapters.input.rest.s
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -41,13 +39,16 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
 import org.springframework.web.bind.annotation.RequestMapping;
 
 /**
- * Matriz de seguridad de billing (H9, SEC-1..3): los cuatro controladores (BFV, BFC, BNC, BDC) por los
- * seis alcances (R, C, U, D, EM, AN). Verifica (1) por reflexion que todo handler lleva
- * {@code @PreAuthorize} con {@code hasAuthority} (nada publico, sin permitAll/anonymous), (2) que sin
- * credenciales cada endpoint responde 401, (3) que con TODOS los permisos salvo el requerido responde
- * 403 y el caso de uso nunca se invoca, y (4) que con el permiso exacto la peticion pasa la
- * autorizacion. Los soportes de endpoints se mockean: aqui solo se prueba la capa de seguridad. Los
- * cuerpos son validos para que la validacion (400) no oculte la autorizacion.
+ * Seguridad de billing (H9, SEC-1..3) con los permisos ABIERTOS vigentes: hoy toda constante de
+ * {@link BillingPermissions} es {@code isAuthenticated()}, asi que lo unico que separa a un usuario
+ * de un endpoint es estar autenticado. Verifica (1) por reflexion que ningun handler usa
+ * {@code hasAuthority}/{@code permitAll}/{@code anonymous} y que cualquier {@code @PreAuthorize}
+ * presente es exactamente {@code isAuthenticated()}, (2) que sin credenciales cada endpoint responde
+ * 401 y el caso de uso nunca se invoca, y (3) que un usuario autenticado, tenga o no authorities,
+ * pasa la autorizacion de TODOS los endpoints (ya no existe el 403 por permiso faltante; volvera a
+ * probarse por recurso/alcance cuando se definan permisos granulares en Keycloak). Los soportes de
+ * endpoints se mockean: aqui solo se prueba la capa de seguridad. Los cuerpos son validos para que
+ * la validacion (400) no oculte la autorizacion.
  */
 @WebMvcTest(controllers = {BillingSaleInvoiceController.class, BillingPurchaseInvoiceController.class,
         BillingSaleReturnController.class, BillingPurchaseReturnController.class})
@@ -57,8 +58,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 @ActiveProfiles("test")
 class BillingSecurityWebMvcTest {
 
-    private static final List<String> RESOURCES = List.of("BFV", "BFC", "BNC", "BDC");
-    private static final List<String> SCOPES = List.of("R", "C", "U", "D", "EM", "AN");
+    private static final String AUTHENTICATED = "isAuthenticated()";
     private static final List<Class<?>> CONTROLLERS = List.of(BillingSaleInvoiceController.class,
             BillingPurchaseInvoiceController.class, BillingSaleReturnController.class,
             BillingPurchaseReturnController.class);
@@ -79,16 +79,12 @@ class BillingSecurityWebMvcTest {
     @MockitoBean
     private BillingReturnEndpointSupport returnSupport;
 
-    /** Un endpoint del modulo y el permiso (recurso#alcance) que lo protege. */
-    record Endpoint(String resource, String scope, HttpMethod method, String path, String body) {
-
-        String permission() {
-            return resource + "#" + scope;
-        }
+    /** Un endpoint del modulo. */
+    record Endpoint(HttpMethod method, String path, String body) {
 
         @Override
         public String toString() {
-            return method + " " + path + " [" + permission() + "]";
+            return method + " " + path;
         }
     }
 
@@ -96,48 +92,44 @@ class BillingSecurityWebMvcTest {
 
     private static List<Endpoint> endpoints() {
         List<Endpoint> all = new ArrayList<>();
-        all.addAll(invoiceEndpoints("BFV", BillingSaleInvoiceController.BASE_PATH));
-        all.addAll(invoiceEndpoints("BFC", BillingPurchaseInvoiceController.BASE_PATH));
-        all.addAll(returnEndpoints("BNC", BillingSaleReturnController.BASE_PATH));
-        all.addAll(returnEndpoints("BDC", BillingPurchaseReturnController.BASE_PATH));
+        all.addAll(invoiceEndpoints(BillingSaleInvoiceController.BASE_PATH));
+        all.addAll(invoiceEndpoints(BillingPurchaseInvoiceController.BASE_PATH));
+        all.addAll(returnEndpoints(BillingSaleReturnController.BASE_PATH));
+        all.addAll(returnEndpoints(BillingPurchaseReturnController.BASE_PATH));
         return all;
     }
 
-    private static List<Endpoint> invoiceEndpoints(String resource, String base) {
+    private static List<Endpoint> invoiceEndpoints(String base) {
         String id = "/" + uuid(2);
         return List.of(
-                new Endpoint(resource, "C", HttpMethod.POST, base, INVOICE_BODY),
-                new Endpoint(resource, "U", HttpMethod.PUT, base + id, INVOICE_BODY),
-                new Endpoint(resource, "D", HttpMethod.DELETE, base + id, null),
-                new Endpoint(resource, "C", HttpMethod.POST, base + id + "/duplicate", null),
-                new Endpoint(resource, "EM", HttpMethod.POST, base + id + "/emit", null),
-                new Endpoint(resource, "AN", HttpMethod.POST, base + id + "/annul", null),
-                new Endpoint(resource, "R", HttpMethod.GET, base + id, null),
-                new Endpoint(resource, "R", HttpMethod.GET, base, null),
-                // sub-recursos de devoluciones de la factura: permiso de consulta de la factura
-                new Endpoint(resource, "R", HttpMethod.GET, base + id + "/return-availability", null),
-                new Endpoint(resource, "R", HttpMethod.GET, base + id + "/returns", null),
-                new Endpoint(resource, "R", HttpMethod.GET, base + "/with-returns", null));
+                new Endpoint(HttpMethod.POST, base, INVOICE_BODY),
+                new Endpoint(HttpMethod.PUT, base + id, INVOICE_BODY),
+                new Endpoint(HttpMethod.DELETE, base + id, null),
+                new Endpoint(HttpMethod.POST, base + id + "/duplicate", null),
+                new Endpoint(HttpMethod.POST, base + id + "/emit", null),
+                new Endpoint(HttpMethod.POST, base + id + "/annul", null),
+                new Endpoint(HttpMethod.GET, base + id, null),
+                new Endpoint(HttpMethod.GET, base, null),
+                // sub-recursos de devoluciones de la factura
+                new Endpoint(HttpMethod.GET, base + id + "/return-availability", null),
+                new Endpoint(HttpMethod.GET, base + id + "/returns", null),
+                new Endpoint(HttpMethod.GET, base + "/with-returns", null));
     }
 
-    private static List<Endpoint> returnEndpoints(String resource, String base) {
+    private static List<Endpoint> returnEndpoints(String base) {
         String id = "/" + uuid(2);
         return List.of(
-                new Endpoint(resource, "C", HttpMethod.POST, base, RETURN_BODY),
-                new Endpoint(resource, "U", HttpMethod.PUT, base + id, RETURN_BODY),
-                new Endpoint(resource, "D", HttpMethod.DELETE, base + id, null),
-                new Endpoint(resource, "EM", HttpMethod.POST, base + id + "/emit", null),
-                new Endpoint(resource, "AN", HttpMethod.POST, base + id + "/annul", null),
-                new Endpoint(resource, "R", HttpMethod.GET, base + id, null),
-                new Endpoint(resource, "R", HttpMethod.GET, base, null));
+                new Endpoint(HttpMethod.POST, base, RETURN_BODY),
+                new Endpoint(HttpMethod.PUT, base + id, RETURN_BODY),
+                new Endpoint(HttpMethod.DELETE, base + id, null),
+                new Endpoint(HttpMethod.POST, base + id + "/emit", null),
+                new Endpoint(HttpMethod.POST, base + id + "/annul", null),
+                new Endpoint(HttpMethod.GET, base + id, null),
+                new Endpoint(HttpMethod.GET, base, null));
     }
 
     static Stream<Arguments> endpointArguments() {
         return endpoints().stream().map(Arguments::of);
-    }
-
-    private static List<String> allPermissions() {
-        return RESOURCES.stream().flatMap(r -> SCOPES.stream().map(s -> r + "#" + s)).toList();
     }
 
     private MockHttpServletRequestBuilder build(Endpoint endpoint) {
@@ -149,7 +141,7 @@ class BillingSecurityWebMvcTest {
         return builder;
     }
 
-    // ---------- SEC-1: reflexion, nada publico ----------
+    // ---------- SEC-1: reflexion, nada publico ni con permisos finos ----------
 
     private static List<Method> handlers(Class<?> controller) {
         return java.util.Arrays.stream(controller.getDeclaredMethods())
@@ -159,19 +151,19 @@ class BillingSecurityWebMvcTest {
     }
 
     @Test
-    void SEC_1_every_handler_of_the_four_controllers_has_pre_authorize_has_authority() {
+    void SEC_1_no_handler_is_public_and_any_pre_authorize_present_is_exactly_is_authenticated() {
         for (Class<?> controller : CONTROLLERS) {
             List<Method> handlers = handlers(controller);
             assertThat(handlers).as("handlers of %s", controller.getSimpleName()).isNotEmpty();
             for (Method handler : handlers) {
                 PreAuthorize annotation = handler.getAnnotation(PreAuthorize.class);
-                assertThat(annotation)
-                        .as("@PreAuthorize on %s.%s", controller.getSimpleName(), handler.getName())
-                        .isNotNull();
+                if (annotation == null) {
+                    continue; // lo protege la cadena de filtros: anyRequest().authenticated()
+                }
                 assertThat(annotation.value())
                         .as("expression on %s.%s", controller.getSimpleName(), handler.getName())
-                        .startsWith("hasAuthority('")
-                        .doesNotContain("permitAll", "isAnonymous", "or ", "||");
+                        .isEqualTo(AUTHENTICATED)
+                        .doesNotContain("permitAll", "isAnonymous", "hasAuthority");
             }
         }
     }
@@ -185,39 +177,15 @@ class BillingSecurityWebMvcTest {
     }
 
     @Test
-    void SEC_1_every_handler_authority_belongs_to_its_own_resource_and_is_in_the_matrix() {
-        String[] resourceByController = {"BFV", "BFC", "BNC", "BDC"};
-        Set<String> declared = new LinkedHashSet<>();
-        for (int i = 0; i < CONTROLLERS.size(); i++) {
-            for (Method handler : handlers(CONTROLLERS.get(i))) {
-                String expression = handler.getAnnotation(PreAuthorize.class).value();
-                String authority = expression.substring("hasAuthority('".length(), expression.length() - 2);
-                assertThat(authority).startsWith(resourceByController[i] + "#");
-                assertThat(allPermissions()).contains(authority);
-                declared.add(authority);
-            }
-        }
-        // los 24 permisos de la matriz se usan al menos una vez
-        assertThat(declared).containsExactlyInAnyOrderElementsOf(allPermissions());
-    }
-
-    @Test
-    void SEC_2_permission_constants_cover_the_full_matrix() throws IllegalAccessException {
-        Set<String> constants = new LinkedHashSet<>();
+    void SEC_2_every_permission_constant_is_currently_is_authenticated() throws IllegalAccessException {
+        int constants = 0;
         for (java.lang.reflect.Field field : BillingPermissions.class.getDeclaredFields()) {
             if (Modifier.isPublic(field.getModifiers()) && field.getType() == String.class) {
-                String value = (String) field.get(null);
-                constants.add(value.substring("hasAuthority('".length(), value.length() - 2));
+                assertThat((String) field.get(null)).as(field.getName()).isEqualTo(AUTHENTICATED);
+                constants++;
             }
         }
-        assertThat(constants).containsExactlyInAnyOrderElementsOf(allPermissions());
-    }
-
-    @Test
-    void SEC_2_endpoint_catalog_covers_every_resource_and_scope_pair() {
-        Set<String> covered = new LinkedHashSet<>();
-        endpoints().forEach(e -> covered.add(e.permission()));
-        assertThat(covered).containsExactlyInAnyOrderElementsOf(allPermissions());
+        assertThat(constants).as("la matriz de 4 recursos x 6 alcances sigue declarada").isEqualTo(24);
     }
 
     // ---------- SEC-1: sin credenciales -> 401 ----------
@@ -235,79 +203,34 @@ class BillingSecurityWebMvcTest {
         mockMvc.perform(request(HttpMethod.GET, "/api/billing/unknown")).andExpect(status().isUnauthorized());
     }
 
-    // ---------- SEC-2: permiso equivocado -> 403 ----------
+    // ---------- SEC-2/3: autenticado -> pasa, con o sin authorities (permisos abiertos) ----------
 
-    @ParameterizedTest(name = "SEC_2 all permissions but {0} -> 403")
+    @ParameterizedTest(name = "SEC_2 authenticated without authorities {0} -> authorized")
     @MethodSource("endpointArguments")
-    void SEC_2_user_with_every_other_permission_gets_403_and_use_case_is_not_called(Endpoint endpoint)
-            throws Exception {
-        String[] others = allPermissions().stream().filter(p -> !p.equals(endpoint.permission()))
-                .toArray(String[]::new);
-
-        mockMvc.perform(build(endpoint).with(user("tester").authorities(AuthorityUtils.createAuthorityList(others))))
-                .andExpect(status().isForbidden());
-
-        verifyNoInteractions(invoiceSupport, returnSupport);
-    }
-
-    @ParameterizedTest(name = "SEC_2 authenticated without authorities {0} -> 403")
-    @MethodSource("endpointArguments")
-    void SEC_2_authenticated_user_without_authorities_gets_403(Endpoint endpoint) throws Exception {
+    void SEC_2_authenticated_user_without_authorities_is_not_forbidden(Endpoint endpoint) throws Exception {
         mockMvc.perform(build(endpoint).with(user("tester").authorities(AuthorityUtils.NO_AUTHORITIES)))
-                .andExpect(status().isForbidden());
-
-        verifyNoInteractions(invoiceSupport, returnSupport);
+                .andExpect(status().is2xxSuccessful());
     }
 
-    @ParameterizedTest(name = "SEC_2 same scope on another resource {0} -> 403")
+    @ParameterizedTest(name = "SEC_3 authenticated with unrelated authorities {0} -> authorized")
     @MethodSource("endpointArguments")
-    void SEC_2_same_scope_of_a_different_resource_does_not_grant_access(Endpoint endpoint) throws Exception {
-        String[] sameScopeOtherResources = RESOURCES.stream().filter(r -> !r.equals(endpoint.resource()))
-                .map(r -> r + "#" + endpoint.scope()).toArray(String[]::new);
-
+    void SEC_3_authorities_do_not_matter_while_permissions_are_open(Endpoint endpoint) throws Exception {
         mockMvc.perform(build(endpoint)
-                        .with(user("tester").authorities(AuthorityUtils.createAuthorityList(sameScopeOtherResources))))
-                .andExpect(status().isForbidden());
-
-        verifyNoInteractions(invoiceSupport, returnSupport);
-    }
-
-    @ParameterizedTest(name = "SEC_2 read-only user on {0}")
-    @MethodSource("endpointArguments")
-    void SEC_2_consult_only_user_can_only_pass_read_endpoints(Endpoint endpoint) throws Exception {
-        var result = mockMvc.perform(build(endpoint)
-                .with(user("tester").authorities(AuthorityUtils.createAuthorityList(endpoint.resource() + "#R"))));
-
-        if ("R".equals(endpoint.scope())) {
-            result.andExpect(status().is2xxSuccessful());
-        } else {
-            result.andExpect(status().isForbidden());
-            verifyNoInteractions(invoiceSupport, returnSupport);
-        }
-    }
-
-    // ---------- SEC-3: permiso exacto -> pasa ----------
-
-    @ParameterizedTest(name = "SEC_3 exact permission {0} -> authorized")
-    @MethodSource("endpointArguments")
-    void SEC_3_user_with_exactly_the_required_permission_passes_authorization(Endpoint endpoint)
-            throws Exception {
-        mockMvc.perform(build(endpoint)
-                        .with(user("tester").authorities(AuthorityUtils.createAuthorityList(endpoint.permission()))))
+                        .with(user("tester").authorities(AuthorityUtils.createAuthorityList("OTRO#R"))))
                 .andExpect(status().is2xxSuccessful());
     }
 
     @Test
-    void SEC_3_consult_only_user_cannot_emit_an_invoice_so_it_stays_in_draft() throws Exception {
+    void SEC_3_any_authenticated_user_can_emit_and_annul_an_invoice_until_granular_permissions_exist()
+            throws Exception {
         for (String base : List.of(BillingSaleInvoiceController.BASE_PATH,
                 BillingPurchaseInvoiceController.BASE_PATH)) {
-            String resource = base.contains("sale") ? "BFV" : "BFC";
-            mockMvc.perform(request(HttpMethod.POST, base + "/" + uuid(2) + "/emit")
-                            .param("enterpriseId", ENTERPRISE_ID)
-                            .with(user("tester").authorities(AuthorityUtils.createAuthorityList(resource + "#R"))))
-                    .andExpect(status().isForbidden());
+            for (String action : List.of("/emit", "/annul")) {
+                mockMvc.perform(request(HttpMethod.POST, base + "/" + uuid(2) + action)
+                                .param("enterpriseId", ENTERPRISE_ID)
+                                .with(user("tester").authorities(AuthorityUtils.NO_AUTHORITIES)))
+                        .andExpect(status().is2xxSuccessful());
+            }
         }
-
-        verifyNoInteractions(invoiceSupport);
     }
 }

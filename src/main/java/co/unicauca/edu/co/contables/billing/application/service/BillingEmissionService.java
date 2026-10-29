@@ -1,12 +1,14 @@
 package co.unicauca.edu.co.contables.billing.application.service;
 
 import co.unicauca.edu.co.contables.billing.application.ports.input.EmitDocumentUseCase;
+import co.unicauca.edu.co.contables.billing.application.ports.output.AccountingEntryPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.BillingClockPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.BillingDocumentRepositoryPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.BillingExecutionContextPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.BillingIdGeneratorPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.BillingOutboxPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.DocumentNumberSequencePort;
+import co.unicauca.edu.co.contables.billing.application.ports.output.StockMovementPort;
 import co.unicauca.edu.co.contables.billing.domain.event.BillingDocumentEmitted;
 import co.unicauca.edu.co.contables.billing.domain.exception.BillingErrorCode;
 import co.unicauca.edu.co.contables.billing.domain.exception.BillingException;
@@ -38,6 +40,11 @@ import java.util.UUID;
  *
  * <p>Devoluciones: cargar -> bloquear la original -> estado y disponibilidad -> emisor ->
  * precondiciones -> secuencia -> emitir -> guardar -> outbox con {@code ReturnEventContext}.
+ *
+ * <p>Idempotente: el documento se carga CON bloqueo de fila, asi que dos emisiones simultaneas se
+ * serializan; si ya esta EMITIDA se devuelve tal cual, sin numero, puertos ni evento nuevos. Los
+ * puertos de stock y asientos se invocan despues de guardar y antes del outbox, DENTRO de la
+ * transaccion: si alguno falla se revierte todo (estado, numero y evento).
  */
 public class BillingEmissionService implements EmitDocumentUseCase {
 
@@ -49,12 +56,15 @@ public class BillingEmissionService implements EmitDocumentUseCase {
     private final BillingExecutionContextPort context;
     private final BillingClockPort clock;
     private final BillingIdGeneratorPort ids;
+    private final StockMovementPort stock;
+    private final AccountingEntryPort accounting;
     private final ReturnAvailabilityCalculator calculator = new ReturnAvailabilityCalculator();
     private final ReturnEventContextFactory returnContexts = new ReturnEventContextFactory(calculator);
 
     public BillingEmissionService(BillingDocumentRepositoryPort repository, BillingDocumentLoader loader,
             BillingReferenceResolver resolver, DocumentNumberSequencePort sequence, BillingOutboxPort outbox,
-            BillingExecutionContextPort context, BillingClockPort clock, BillingIdGeneratorPort ids) {
+            BillingExecutionContextPort context, BillingClockPort clock, BillingIdGeneratorPort ids,
+            StockMovementPort stock, AccountingEntryPort accounting) {
         this.repository = Objects.requireNonNull(repository, "repository");
         this.loader = Objects.requireNonNull(loader, "loader");
         this.resolver = Objects.requireNonNull(resolver, "resolver");
@@ -63,12 +73,18 @@ public class BillingEmissionService implements EmitDocumentUseCase {
         this.context = Objects.requireNonNull(context, "context");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.ids = Objects.requireNonNull(ids, "ids");
+        this.stock = Objects.requireNonNull(stock, "stock");
+        this.accounting = Objects.requireNonNull(accounting, "accounting");
     }
 
     @Override
     public BillingDocument emit(String enterpriseId, DocumentType type, UUID id, Long version) {
         Objects.requireNonNull(type, "type");
-        BillingDocument document = loader.load(enterpriseId, type, id, version);
+        BillingDocument document = loader.loadForUpdate(enterpriseId, type, id, null);
+        if (document.status() == DocumentStatus.EMITIDA) {
+            return document; // repeticion: mismo resultado, sin numero ni evento nuevos
+        }
+        document.ensureVersion(version);
         requireDraft(document);
         return type.isReturn() ? emitReturn(enterpriseId, type, document) : emitInvoice(enterpriseId, type, document);
     }
@@ -108,6 +124,7 @@ public class BillingEmissionService implements EmitDocumentUseCase {
         document.emit(DocumentNumber.of(type, numberValue), issuer, null, now, context.username());
 
         BillingDocument saved = repository.save(document);
+        integrate(saved);
         outbox.append(new BillingDocumentEmitted(ids.newId(), now, saved,
                 returnContexts.forReturn(saved, original, returns)));
         return saved;
@@ -125,8 +142,15 @@ public class BillingEmissionService implements EmitDocumentUseCase {
         document.emit(DocumentNumber.of(type, numberValue), issuer, freshCounterparty, now, context.username());
 
         BillingDocument saved = repository.save(document);
+        integrate(saved);
         outbox.append(new BillingDocumentEmitted(ids.newId(), now, saved, null));
         return saved;
+    }
+
+    /** Integraciones sincronas de la misma transaccion; cualquier excepcion revierte la emision completa. */
+    private void integrate(BillingDocument emitted) {
+        stock.onEmitted(emitted);
+        accounting.onEmitted(emitted);
     }
 
     // ---------- internos ----------

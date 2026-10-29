@@ -20,6 +20,7 @@ import co.unicauca.edu.co.contables.billing.domain.exception.BillingErrorCode;
 import co.unicauca.edu.co.contables.billing.domain.exception.BillingException;
 import co.unicauca.edu.co.contables.billing.domain.model.BillingDocument;
 import co.unicauca.edu.co.contables.billing.domain.model.DocumentType;
+import co.unicauca.edu.co.contables.billing.support.FakeIntegrationPort;
 import co.unicauca.edu.co.contables.billing.infrastructure.adapters.output.context.BillingClockAdapter;
 import co.unicauca.edu.co.contables.billing.infrastructure.adapters.output.context.BillingExecutionContextAdapter;
 import co.unicauca.edu.co.contables.billing.infrastructure.adapters.output.messaging.BillingOutboxAdapter;
@@ -102,9 +103,11 @@ class BillingReturnEmissionConcurrencyTest {
                 (enterprise, thirdId, role) -> Optional.empty(),
                 (enterprise, productId, kind) -> Optional.empty(),
                 enterprise -> Optional.of(issuer()));
+        FakeIntegrationPort integration = new FakeIntegrationPort();
         emission = new BillingEmissionService(adapter, loader, resolver, sequence, outbox, executionContext, clock,
-                UUID::randomUUID);
-        annulment = new BillingAnnulmentService(adapter, loader, outbox, executionContext, clock, UUID::randomUUID);
+                UUID::randomUUID, integration, integration);
+        annulment = new BillingAnnulmentService(adapter, loader, outbox, executionContext, clock, UUID::randomUUID,
+                integration, integration);
     }
 
     @AfterEach
@@ -319,7 +322,7 @@ class BillingReturnEmissionConcurrencyTest {
 
     @Test
     @Timeout(90)
-    void DRF_3_emitting_the_same_return_draft_twice_at_once_has_one_winner_and_consumes_one_number()
+    void DRF_3_emitting_the_same_return_draft_twice_at_once_gives_both_the_same_emitted_return_and_one_number()
             throws Exception {
         BillingDocument original = invoiceWithQuantity(uuid(1), 7L, "10");
         seed(TENANT_A, original, draftReturn(original, uuid(2), "3"));
@@ -327,10 +330,10 @@ class BillingReturnEmissionConcurrencyTest {
         List<Outcome> outcomes = raceBehindLock(uuid(1), List.of(
                 () -> emit(TENANT_A, uuid(2)), () -> emit(TENANT_A, uuid(2))));
 
-        assertThat(successes(outcomes)).hasSize(1);
-        assertThat(failures(outcomes)).hasSize(1);
-        assertThat(failures(outcomes).get(0).code()).isIn(BillingErrorCode.BILLING_CONCURRENT_MODIFICATION,
-                BillingErrorCode.BILLING_INVALID_STATE);
+        // idempotente: la segunda espera el bloqueo del documento, ve EMITIDA y devuelve la misma devolucion
+        assertThat(successes(outcomes)).hasSize(2);
+        assertThat(successes(outcomes)).extracting(outcome -> outcome.document().number().display())
+                .containsOnly("NC-000001");
         assertThat(returnsInStatus("EMITIDA")).isEqualTo(1L);
         assertThat(lastReturnNumber()).isEqualTo(1L);
         assertThat(outboxRows()).isEqualTo(1L);

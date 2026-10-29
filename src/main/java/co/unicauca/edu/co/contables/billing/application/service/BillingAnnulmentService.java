@@ -1,11 +1,13 @@
 package co.unicauca.edu.co.contables.billing.application.service;
 
 import co.unicauca.edu.co.contables.billing.application.ports.input.AnnulDocumentUseCase;
+import co.unicauca.edu.co.contables.billing.application.ports.output.AccountingEntryPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.BillingClockPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.BillingDocumentRepositoryPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.BillingExecutionContextPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.BillingIdGeneratorPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.BillingOutboxPort;
+import co.unicauca.edu.co.contables.billing.application.ports.output.StockMovementPort;
 import co.unicauca.edu.co.contables.billing.domain.event.BillingDocumentAnnulled;
 import co.unicauca.edu.co.contables.billing.domain.event.ReturnEventContext;
 import co.unicauca.edu.co.contables.billing.domain.exception.BillingErrorCode;
@@ -35,22 +37,30 @@ public class BillingAnnulmentService implements AnnulDocumentUseCase {
     private final BillingExecutionContextPort context;
     private final BillingClockPort clock;
     private final BillingIdGeneratorPort ids;
+    private final StockMovementPort stock;
+    private final AccountingEntryPort accounting;
     private final ReturnEventContextFactory returnContexts = new ReturnEventContextFactory();
 
     public BillingAnnulmentService(BillingDocumentRepositoryPort repository, BillingDocumentLoader loader,
             BillingOutboxPort outbox, BillingExecutionContextPort context, BillingClockPort clock,
-            BillingIdGeneratorPort ids) {
+            BillingIdGeneratorPort ids, StockMovementPort stock, AccountingEntryPort accounting) {
         this.repository = Objects.requireNonNull(repository, "repository");
         this.loader = Objects.requireNonNull(loader, "loader");
         this.outbox = Objects.requireNonNull(outbox, "outbox");
         this.context = Objects.requireNonNull(context, "context");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.ids = Objects.requireNonNull(ids, "ids");
+        this.stock = Objects.requireNonNull(stock, "stock");
+        this.accounting = Objects.requireNonNull(accounting, "accounting");
     }
 
     @Override
     public BillingDocument annul(String enterpriseId, DocumentType type, UUID id, String reason, Long version) {
-        BillingDocument document = loader.loadForUpdate(enterpriseId, type, id, version);
+        BillingDocument document = loader.loadForUpdate(enterpriseId, type, id, null);
+        if (document.status() == DocumentStatus.ANULADA) {
+            return document; // repeticion: mismo resultado, sin puertos ni evento nuevos
+        }
+        document.ensureVersion(version);
 
         // Solo una factura EMITIDA puede tener devoluciones que bloqueen; en cualquier otro estado el
         // dominio rechaza con INVALID_STATE y se evita la consulta.
@@ -62,6 +72,8 @@ public class BillingAnnulmentService implements AnnulDocumentUseCase {
         document.annul(reason, hasEmittedReturns, now, context.username());
 
         BillingDocument saved = repository.save(document);
+        stock.onAnnulled(saved);
+        accounting.onAnnulled(saved);
         outbox.append(new BillingDocumentAnnulled(ids.newId(), now, saved,
                 saved.type().isReturn() ? returnContext(enterpriseId, saved) : null));
         return saved;

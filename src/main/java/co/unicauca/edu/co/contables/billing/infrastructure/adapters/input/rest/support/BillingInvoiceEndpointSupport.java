@@ -1,6 +1,7 @@
 package co.unicauca.edu.co.contables.billing.infrastructure.adapters.input.rest.support;
 
 import co.unicauca.edu.co.contables.billing.application.ports.input.AnnulDocumentUseCase;
+import co.unicauca.edu.co.contables.billing.application.ports.input.CreateDocumentIdempotentlyUseCase;
 import co.unicauca.edu.co.contables.billing.application.ports.input.DeleteDocumentDraftUseCase;
 import co.unicauca.edu.co.contables.billing.application.ports.input.DuplicateInvoiceDraftUseCase;
 import co.unicauca.edu.co.contables.billing.application.ports.input.EmitDocumentUseCase;
@@ -42,6 +43,7 @@ import org.springframework.web.util.UriComponentsBuilder;
 public class BillingInvoiceEndpointSupport {
 
     private final SaveInvoiceDraftUseCase saveUseCase;
+    private final CreateDocumentIdempotentlyUseCase idempotentCreateUseCase;
     private final DuplicateInvoiceDraftUseCase duplicateUseCase;
     private final DeleteDocumentDraftUseCase deleteUseCase;
     private final GetDocumentUseCase getUseCase;
@@ -54,12 +56,13 @@ public class BillingInvoiceEndpointSupport {
     private final BillingRestMapper mapper;
 
     public BillingInvoiceEndpointSupport(SaveInvoiceDraftUseCase saveUseCase,
-            DuplicateInvoiceDraftUseCase duplicateUseCase, DeleteDocumentDraftUseCase deleteUseCase,
+            CreateDocumentIdempotentlyUseCase idempotentCreateUseCase, DuplicateInvoiceDraftUseCase duplicateUseCase, DeleteDocumentDraftUseCase deleteUseCase,
             GetDocumentUseCase getUseCase, ListDocumentsUseCase listUseCase, EmitDocumentUseCase emitUseCase,
             AnnulDocumentUseCase annulUseCase, GetReturnAvailabilityUseCase availabilityUseCase,
             ListDocumentReturnsUseCase returnsUseCase, ListInvoicesWithReturnsUseCase withReturnsUseCase,
             BillingRestMapper mapper) {
         this.saveUseCase = saveUseCase;
+        this.idempotentCreateUseCase = idempotentCreateUseCase;
         this.duplicateUseCase = duplicateUseCase;
         this.deleteUseCase = deleteUseCase;
         this.getUseCase = getUseCase;
@@ -94,7 +97,10 @@ public class BillingInvoiceEndpointSupport {
         return ResponseEntity.ok(body);
     }
 
-    /** POST /{id}/emit: 200 con el documento emitido; el cuerpo es opcional (EMT-1..4). */
+    /**
+     * POST /{id}/emit: 200 con el documento emitido; el cuerpo es opcional (EMT-1..4). Idempotente:
+     * repetirlo sobre un documento ya EMITIDA devuelve 200 con el mismo documento.
+     */
     public ResponseEntity<BillingInvoiceResponse> emit(DocumentType type, String enterpriseId, UUID id,
             EmitRequest request) {
         Long version = request == null ? null : request.version();
@@ -104,7 +110,8 @@ public class BillingInvoiceEndpointSupport {
 
     /**
      * POST /{id}/annul: 200 con el documento anulado (ANL-1). Un cuerpo ausente equivale a motivo
-     * nulo: el dominio responde 400 BILLING_ANNUL_REASON_REQUIRED.
+     * nulo: el dominio responde 400 BILLING_ANNUL_REASON_REQUIRED. Idempotente: sobre un documento ya
+     * ANULADA devuelve 200 con el mismo documento.
      */
     public ResponseEntity<BillingInvoiceResponse> annul(DocumentType type, String enterpriseId, UUID id,
             AnnulRequest request) {
@@ -114,10 +121,17 @@ public class BillingInvoiceEndpointSupport {
         return ResponseEntity.ok(mapper.toResponse(BillingDocumentView.of(doc)));
     }
 
-    /** POST: 201 con Location apuntando al nuevo borrador (DRF-1). */
+    /**
+     * POST: 201 con Location apuntando al nuevo borrador (DRF-1). Con el header opcional
+     * {@code Idempotency-Key} (UUID) repetir la peticion devuelve el MISMO documento (tambien 201 y
+     * mismo Location) y la misma clave con otro cuerpo es 409 BILLING_IDEMPOTENCY_CONFLICT.
+     */
     public ResponseEntity<BillingInvoiceResponse> create(DocumentType type, String basePath,
-            String enterpriseId, InvoiceDraftRequest request) {
-        BillingDocument doc = saveUseCase.create(enterpriseId, type, mapper.toCommand(request));
+            String enterpriseId, InvoiceDraftRequest request, String idempotencyKeyHeader) {
+        String idempotencyKey = BillingIdempotencyHeader.parse(idempotencyKeyHeader);
+        BillingDocument doc = idempotencyKey == null
+                ? saveUseCase.create(enterpriseId, type, mapper.toCommand(request))
+                : idempotentCreateUseCase.createInvoice(enterpriseId, type, mapper.toCommand(request), idempotencyKey);
         return created(basePath, enterpriseId, doc);
     }
 

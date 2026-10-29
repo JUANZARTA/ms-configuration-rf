@@ -1,6 +1,7 @@
 package co.unicauca.edu.co.contables.billing.infrastructure.adapters.input.rest.support;
 
 import co.unicauca.edu.co.contables.billing.application.ports.input.AnnulDocumentUseCase;
+import co.unicauca.edu.co.contables.billing.application.ports.input.CreateDocumentIdempotentlyUseCase;
 import co.unicauca.edu.co.contables.billing.application.ports.input.DeleteDocumentDraftUseCase;
 import co.unicauca.edu.co.contables.billing.application.ports.input.EmitDocumentUseCase;
 import co.unicauca.edu.co.contables.billing.application.ports.input.GetDocumentUseCase;
@@ -33,6 +34,7 @@ import org.springframework.web.util.UriComponentsBuilder;
 public class BillingReturnEndpointSupport {
 
     private final SaveReturnDraftUseCase saveUseCase;
+    private final CreateDocumentIdempotentlyUseCase idempotentCreateUseCase;
     private final DeleteDocumentDraftUseCase deleteUseCase;
     private final GetDocumentUseCase getUseCase;
     private final ListDocumentsUseCase listUseCase;
@@ -41,10 +43,11 @@ public class BillingReturnEndpointSupport {
     private final BillingRestMapper mapper;
 
     public BillingReturnEndpointSupport(SaveReturnDraftUseCase saveUseCase,
-            DeleteDocumentDraftUseCase deleteUseCase, GetDocumentUseCase getUseCase,
+            CreateDocumentIdempotentlyUseCase idempotentCreateUseCase, DeleteDocumentDraftUseCase deleteUseCase, GetDocumentUseCase getUseCase,
             ListDocumentsUseCase listUseCase, EmitDocumentUseCase emitUseCase,
             AnnulDocumentUseCase annulUseCase, BillingRestMapper mapper) {
         this.saveUseCase = saveUseCase;
+        this.idempotentCreateUseCase = idempotentCreateUseCase;
         this.deleteUseCase = deleteUseCase;
         this.getUseCase = getUseCase;
         this.listUseCase = listUseCase;
@@ -53,10 +56,17 @@ public class BillingReturnEndpointSupport {
         this.mapper = mapper;
     }
 
-    /** POST: 201 con Location apuntando al nuevo borrador de devolucion (RET-4). */
+    /**
+     * POST: 201 con Location apuntando al nuevo borrador de devolucion (RET-4). Con el header opcional
+     * {@code Idempotency-Key} (UUID) repetir la peticion devuelve la MISMA devolucion (tambien 201 y
+     * mismo Location) y la misma clave con otro cuerpo es 409 BILLING_IDEMPOTENCY_CONFLICT.
+     */
     public ResponseEntity<BillingReturnResponse> create(DocumentType type, String basePath, String enterpriseId,
-            ReturnDraftRequest request) {
-        BillingDocument doc = saveUseCase.create(enterpriseId, type, mapper.toCommand(request));
+            ReturnDraftRequest request, String idempotencyKeyHeader) {
+        String idempotencyKey = BillingIdempotencyHeader.parse(idempotencyKeyHeader);
+        BillingDocument doc = idempotencyKey == null
+                ? saveUseCase.create(enterpriseId, type, mapper.toCommand(request))
+                : idempotentCreateUseCase.createReturn(enterpriseId, type, mapper.toCommand(request), idempotencyKey);
         URI location = UriComponentsBuilder.fromPath(basePath)
                 .pathSegment(doc.id().toString())
                 .queryParam("enterpriseId", enterpriseId)
@@ -79,7 +89,10 @@ public class BillingReturnEndpointSupport {
         return ResponseEntity.noContent().build();
     }
 
-    /** POST /{id}/emit: 200 con la devolucion emitida (RET-5, RET-6); el cuerpo es opcional. */
+    /**
+     * POST /{id}/emit: 200 con la devolucion emitida (RET-5, RET-6); el cuerpo es opcional.
+     * Idempotente: repetirlo sobre una devolucion ya EMITIDA devuelve 200 con la misma.
+     */
     public ResponseEntity<BillingReturnResponse> emit(DocumentType type, String enterpriseId, UUID id,
             EmitRequest request) {
         Long version = request == null ? null : request.version();
@@ -89,7 +102,8 @@ public class BillingReturnEndpointSupport {
 
     /**
      * POST /{id}/annul: 200 con la devolucion anulada (RET-7). Un cuerpo ausente equivale a motivo
-     * nulo: el dominio responde 400 BILLING_ANNUL_REASON_REQUIRED.
+     * nulo: el dominio responde 400 BILLING_ANNUL_REASON_REQUIRED. Idempotente: sobre una devolucion
+     * ya ANULADA devuelve 200 con la misma.
      */
     public ResponseEntity<BillingReturnResponse> annul(DocumentType type, String enterpriseId, UUID id,
             AnnulRequest request) {

@@ -47,6 +47,14 @@ class BillingRestExceptionHandlerTest {
     }
 
     @Test
+    void IDM_2_idempotency_conflict_is_409_with_its_own_code() throws Exception {
+        mockMvc.perform(get("/probe/idempotency"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("BILLING_IDEMPOTENCY_CONFLICT"))
+                .andExpect(jsonPath("$.status").value(409));
+    }
+
+    @Test
     void ERR_1_not_found_is_404() throws Exception {
         mockMvc.perform(get("/probe/not-found"))
                 .andExpect(status().isNotFound())
@@ -139,6 +147,11 @@ class BillingRestExceptionHandlerTest {
         @GetMapping("/state")
         public String state() {
             throw new BillingException(BillingErrorCode.BILLING_INVALID_STATE, "documento emitido");
+        }
+
+        @GetMapping("/idempotency")
+        public String idempotency() {
+            throw new BillingException(BillingErrorCode.BILLING_IDEMPOTENCY_CONFLICT, "otro contenido");
         }
 
         @GetMapping("/not-found")

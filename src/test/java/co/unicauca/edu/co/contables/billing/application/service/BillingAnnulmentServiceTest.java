@@ -25,15 +25,19 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+import co.unicauca.edu.co.contables.billing.application.ports.output.AccountingEntryPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.BillingClockPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.BillingDocumentRepositoryPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.BillingExecutionContextPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.BillingIdGeneratorPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.BillingOutboxPort;
+import co.unicauca.edu.co.contables.billing.application.ports.output.StockMovementPort;
 import co.unicauca.edu.co.contables.billing.domain.event.BillingDocumentAnnulled;
 import co.unicauca.edu.co.contables.billing.domain.event.BillingDomainEvent;
 import co.unicauca.edu.co.contables.billing.domain.event.ReturnEventContext;
@@ -77,6 +81,10 @@ class BillingAnnulmentServiceTest {
     private BillingClockPort clock;
     @Mock
     private BillingIdGeneratorPort ids;
+    @Mock
+    private StockMovementPort stock;
+    @Mock
+    private AccountingEntryPort accounting;
 
     private BillingAnnulmentService service;
 
@@ -89,7 +97,7 @@ class BillingAnnulmentServiceTest {
         lenient().when(repository.existsReturnInStatus(anyString(), any(UUID.class), any(DocumentStatus.class)))
                 .thenReturn(false);
         service = new BillingAnnulmentService(repository, new BillingDocumentLoader(repository), outbox, context,
-                clock, ids);
+                clock, ids, stock, accounting);
     }
 
     // ---------- helpers ----------
@@ -254,14 +262,92 @@ class BillingAnnulmentServiceTest {
     }
 
     @Test
-    void ANL_1_annulling_an_already_annulled_document_is_409_invalid_state_and_writes_nothing() {
-        lockedStored(annulledSale());
+    void IDM_3_annulling_an_already_annulled_document_returns_it_as_is_and_does_nothing_else() {
+        BillingDocument annulled = annulledSale();
+        lockedStored(annulled);
+
+        BillingDocument result = annulSale(REASON);
+
+        assertThat(result).isSameAs(annulled);
+        assertNothingWritten();
+        verify(repository, never()).existsReturnInStatus(anyString(), any(UUID.class), any(DocumentStatus.class));
+        verifyNoInteractions(stock, accounting);
+    }
+
+    @Test
+    void IDM_3_re_annulling_with_another_reason_or_a_stale_version_still_returns_the_annulled_document() {
+        BillingDocument annulled = withVersion(annulledSale(), 5L);
+        lockedStored(annulled);
+
+        BillingDocument result = service.annul(ENTERPRISE_ID, SALE, DOC_ID, "otro motivo", 4L);
+
+        assertThat(result).isSameAs(annulled);
+        assertNothingWritten();
+    }
+
+    @Test
+    void IDM_3_twenty_consecutive_annuls_append_a_single_event_and_call_the_ports_once() {
+        BillingDocument document = emittedSale();
+        lockedStored(document);
+
+        BillingDocument first = annulSale(REASON);
+        for (int i = 0; i < 19; i++) {
+            lockedStored(first);
+            assertThat(annulSale(REASON)).isSameAs(first);
+        }
+
+        verify(outbox, times(1)).append(any(BillingDomainEvent.class));
+        verify(repository, times(1)).save(any(BillingDocument.class));
+        verify(stock, times(1)).onAnnulled(any(BillingDocument.class));
+        verify(accounting, times(1)).onAnnulled(any(BillingDocument.class));
+    }
+
+    @Test
+    void IDM_3_annulling_a_draft_or_a_missing_state_other_than_the_target_is_still_invalid_state() {
+        lockedStored(readySaleDraft());
 
         Throwable thrown = catchThrowable(() -> annulSale(REASON));
 
         assertThat(codeOf(thrown)).isEqualTo(BillingErrorCode.BILLING_INVALID_STATE);
-        assertNothingWritten();
-        verify(repository, never()).existsReturnInStatus(anyString(), any(UUID.class), any(DocumentStatus.class));
+        verifyNoInteractions(stock, accounting);
+    }
+
+    // ---------- puertos de integracion dentro de la transaccion (stock / asientos) ----------
+
+    @Test
+    void INT_1_annul_calls_stock_then_accounting_after_saving_and_before_the_outbox() {
+        lockedStored(emittedSale());
+
+        BillingDocument annulled = annulSale(REASON);
+
+        InOrder order = inOrder(repository, stock, accounting, outbox);
+        order.verify(repository).save(annulled);
+        order.verify(stock).onAnnulled(annulled);
+        order.verify(accounting).onAnnulled(annulled);
+        order.verify(outbox).append(any(BillingDocumentAnnulled.class));
+    }
+
+    @Test
+    void INT_2_a_failing_stock_port_propagates_so_no_event_is_appended_and_accounting_is_not_called() {
+        lockedStored(emittedSale());
+        doThrow(new IllegalStateException("inventario no disponible")).when(stock).onAnnulled(any());
+
+        Throwable thrown = catchThrowable(() -> annulSale(REASON));
+
+        assertThat(thrown).isInstanceOf(IllegalStateException.class);
+        verify(outbox, never()).append(any(BillingDomainEvent.class));
+        verifyNoInteractions(accounting);
+    }
+
+    @Test
+    void INT_2_a_failing_accounting_port_propagates_so_no_event_is_appended() {
+        lockedStored(emittedSale());
+        doThrow(new IllegalStateException("contabilidad no disponible")).when(accounting).onAnnulled(any());
+
+        Throwable thrown = catchThrowable(() -> annulSale(REASON));
+
+        assertThat(thrown).isInstanceOf(IllegalStateException.class);
+        verify(outbox, never()).append(any(BillingDomainEvent.class));
     }
 
     @Test
@@ -546,14 +632,17 @@ class BillingAnnulmentServiceTest {
     }
 
     @Test
-    void RET_7_an_already_annulled_return_cannot_be_annulled_again() {
+    void IDM_3_annulling_an_already_annulled_return_returns_it_as_is_without_ports_or_event() {
         BillingDocument original = saleOriginal();
-        lockedStored(annulledReturnOf(original, DOC_ID, 1L, returnLineOf(original, 1, "4")));
+        BillingDocument annulled = annulledReturnOf(original, DOC_ID, 1L, returnLineOf(original, 1, "4"));
+        lockedStored(annulled);
 
-        Throwable thrown = catchThrowable(() -> annulReturn(RETURN_REASON));
+        BillingDocument result = annulReturn(RETURN_REASON);
 
-        assertThat(codeOf(thrown)).isEqualTo(BillingErrorCode.BILLING_INVALID_STATE);
+        assertThat(result).isSameAs(annulled);
         assertNothingWritten();
+        verify(repository, never()).findById(anyString(), any(UUID.class));
+        verifyNoInteractions(stock, accounting);
     }
 
     @Test

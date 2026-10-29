@@ -23,6 +23,7 @@ import static org.mockito.Mockito.when;
 
 import co.unicauca.edu.co.contables.billing.application.ports.input.command.InvoiceDraftCommand;
 import co.unicauca.edu.co.contables.billing.application.ports.input.command.InvoiceLineCommand;
+import co.unicauca.edu.co.contables.billing.application.ports.output.AccountingEntryPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.BillingClockPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.BillingDocumentRepositoryPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.BillingExecutionContextPort;
@@ -31,6 +32,7 @@ import co.unicauca.edu.co.contables.billing.application.ports.output.BillingOutb
 import co.unicauca.edu.co.contables.billing.application.ports.output.DocumentNumberSequencePort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.EnterprisePort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.ProductPort;
+import co.unicauca.edu.co.contables.billing.application.ports.output.StockMovementPort;
 import co.unicauca.edu.co.contables.billing.application.ports.output.ThirdPartyPort;
 import co.unicauca.edu.co.contables.billing.domain.event.BillingDocumentAnnulled;
 import co.unicauca.edu.co.contables.billing.domain.event.BillingDocumentEmitted;
@@ -86,6 +88,10 @@ class BillingInvoiceKindParityTest {
     private BillingClockPort clock;
     @Mock
     private BillingIdGeneratorPort ids;
+    @Mock
+    private StockMovementPort stock;
+    @Mock
+    private AccountingEntryPort accounting;
 
     private BillingInvoiceDraftService draftService;
     private BillingEmissionService emissionService;
@@ -104,8 +110,9 @@ class BillingInvoiceKindParityTest {
         BillingReferenceResolver resolver = new BillingReferenceResolver(thirdParties, products, enterprises);
         draftService = new BillingInvoiceDraftService(repository, loader, resolver, context, clock, ids);
         emissionService = new BillingEmissionService(repository, loader, resolver, sequence, outbox, context,
-                clock, ids);
-        annulmentService = new BillingAnnulmentService(repository, loader, outbox, context, clock, ids);
+                clock, ids, stock, accounting);
+        annulmentService = new BillingAnnulmentService(repository, loader, outbox, context, clock, ids, stock,
+                accounting);
     }
 
     // ---------- helpers ----------
@@ -189,7 +196,7 @@ class BillingInvoiceKindParityTest {
     @EnumSource(value = DocumentType.class, names = {"SALE_INVOICE", "PURCHASE_INVOICE"})
     void PUR_1_emit_takes_the_number_only_from_the_sequence_of_its_own_type_and_prefixes_it(DocumentType type) {
         BillingDocument draft = readyDraft(type);
-        when(repository.findById(ENTERPRISE_ID, draft.id())).thenReturn(Optional.of(draft));
+        when(repository.findByIdForUpdate(ENTERPRISE_ID, draft.id())).thenReturn(Optional.of(draft));
         thirdPartyExistsFor(type);
         productExistsFor(type);
         when(enterprises.findIssuer(ENTERPRISE_ID)).thenReturn(Optional.of(issuer()));
@@ -207,7 +214,7 @@ class BillingInvoiceKindParityTest {
     @EnumSource(value = DocumentType.class, names = {"SALE_INVOICE", "PURCHASE_INVOICE"})
     void EVT_1_emit_appends_an_emitted_event_for_the_saved_document_of_its_type(DocumentType type) {
         BillingDocument draft = readyDraft(type);
-        when(repository.findById(ENTERPRISE_ID, draft.id())).thenReturn(Optional.of(draft));
+        when(repository.findByIdForUpdate(ENTERPRISE_ID, draft.id())).thenReturn(Optional.of(draft));
         thirdPartyExistsFor(type);
         productExistsFor(type);
         when(enterprises.findIssuer(ENTERPRISE_ID)).thenReturn(Optional.of(issuer()));
@@ -227,7 +234,7 @@ class BillingInvoiceKindParityTest {
     @EnumSource(value = DocumentType.class, names = {"SALE_INVOICE", "PURCHASE_INVOICE"})
     void PUR_3_emit_through_the_resource_of_the_other_kind_is_not_found_and_consumes_no_number(DocumentType type) {
         BillingDocument draft = readyDraft(type);
-        when(repository.findById(ENTERPRISE_ID, draft.id())).thenReturn(Optional.of(draft));
+        when(repository.findByIdForUpdate(ENTERPRISE_ID, draft.id())).thenReturn(Optional.of(draft));
 
         Throwable thrown = catchThrowable(
                 () -> emissionService.emit(ENTERPRISE_ID, otherKind(type), draft.id(), null));
